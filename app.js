@@ -4,7 +4,7 @@
 'use strict';
 (() => {
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const STORE_KEY = 'rbf-naplo-v1';
 const PREV_KEY = 'rbf-naplo-v1-import-elotti';
 const BACKUP_DAYS = 7;
@@ -59,6 +59,9 @@ const ft = n => nf.format(Math.round(n || 0)).replace(/\s/g, ' ') + ' Ft';
 const initials = name => String(name || '?').trim().split(/\s+/).slice(0, 2).map(w => w[0]).join('').toUpperCase();
 const cmpSess = (a, b) => a.date.localeCompare(b.date) || (a.time || '99').localeCompare(b.time || '99') || (a.createdAt || 0) - (b.createdAt || 0);
 const huSort = (a, b) => a.localeCompare(b, 'hu');
+const isPlanned = s => s.date > today();
+const isoWd = date => (parse(date).getDay() + 6) % 7 + 1; // 1 = hétfő … 7 = vasárnap
+const WD_LONG_MON = ['hétfő', 'kedd', 'szerda', 'csütörtök', 'péntek', 'szombat', 'vasárnap'];
 
 /* ---------------- Icons ---------------- */
 const I = (p, sw = 1.8) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round">${p}</svg>`;
@@ -129,9 +132,10 @@ function save(countChange = true) {
 /** Kiszámolja, melyik alkalom melyik bérletbe esik (dátum szerint, sorban). */
 function derived() {
   if (cache) return cache;
-  const sessionPass = new Map(), passUsed = new Map(), byClient = new Map(), passesBy = new Map();
+  const t = today();
+  const sessionPass = new Map(), passUsed = new Map(), passDone = new Map(), byClient = new Map(), passesBy = new Map();
   for (const s of db.sessions) { if (!byClient.has(s.clientId)) byClient.set(s.clientId, []); byClient.get(s.clientId).push(s); }
-  for (const p of db.passes) { passUsed.set(p.id, 0); if (!passesBy.has(p.clientId)) passesBy.set(p.clientId, []); passesBy.get(p.clientId).push(p); }
+  for (const p of db.passes) { passUsed.set(p.id, 0); passDone.set(p.id, 0); if (!passesBy.has(p.clientId)) passesBy.set(p.clientId, []); passesBy.get(p.clientId).push(p); }
   for (const list of passesBy.values()) list.sort((a, b) => a.start.localeCompare(b.start) || (a.createdAt || 0) - (b.createdAt || 0));
   for (const [cid, list] of byClient) {
     list.sort(cmpSess);
@@ -142,14 +146,18 @@ function derived() {
         if (p.cat !== s.kind || s.date < p.start || s.date > p.end || passUsed.get(p.id) >= p.sessions) continue;
         hit = p; break;
       }
-      if (hit) { passUsed.set(hit.id, passUsed.get(hit.id) + 1); sessionPass.set(s.id, hit.id); }
+      if (hit) { passUsed.set(hit.id, passUsed.get(hit.id) + 1); if (s.date <= t) passDone.set(hit.id, passDone.get(hit.id) + 1); sessionPass.set(s.id, hit.id); }
       else sessionPass.set(s.id, null);
     }
   }
-  const lastSeen = new Map();
-  for (const [cid, list] of byClient) if (list.length) lastSeen.set(cid, list[list.length - 1].date);
+  const lastSeen = new Map(), planned = new Map();
+  for (const [cid, list] of byClient) {
+    const done = list.filter(s => s.date <= t), fut = list.filter(s => s.date > t);
+    if (done.length) lastSeen.set(cid, done[done.length - 1].date);
+    if (fut.length) planned.set(cid, fut);
+  }
   cache = {
-    sessionPass, passUsed, byClient, passesBy, lastSeen,
+    sessionPass, passUsed, passDone, byClient, passesBy, lastSeen, planned,
     clientMap: new Map(db.clients.map(c => [c.id, c])),
     passMap: new Map(db.passes.map(p => [p.id, p])),
   };
@@ -163,7 +171,7 @@ const clientSessions = cid => derived().byClient.get(cid) || [];
 const clientPasses = cid => derived().passesBy.get(cid) || [];
 
 function passStatus(p) {
-  const used = derived().passUsed.get(p.id) || 0, t = today();
+  const used = derived().passDone.get(p.id) || 0, t = today();
   if (used >= p.sessions) return 'used';
   if (t > p.end) return 'expired';
   if (t < p.start) return 'future';
@@ -186,13 +194,15 @@ function needsBackup() {
 }
 
 function warnings() {
-  const out = [], t = today(), used = derived().passUsed;
+  const out = [], t = today(), used = derived().passDone;
   for (const p of db.passes) {
     const c = getClient(p.clientId); if (!c) continue;
     const u = used.get(p.id) || 0, left = p.sessions - u, st = passStatus(p);
     if (st === 'active') {
       const dl = daysBetween(t, p.end);
+      const overflow = (derived().planned.get(c.id) || []).find(s => s.kind === p.cat && !derived().sessionPass.get(s.id));
       if (dl <= 5) out.push({ type: 'warn', cid: c.id, title: c.name, text: `Bérlet lejár ${dl === 0 ? 'ma' : dl + ' nap múlva'} · még ${left} alkalom` });
+      else if (overflow && (derived().passUsed.get(p.id) || 0) >= p.sessions) out.push({ type: 'warn', cid: c.id, title: c.name, text: `A fix időpontokkal a bérlet elfogy, ${fmtDay(overflow.date)}-től alkalmi` });
       else if (left === 1) out.push({ type: 'warn', cid: c.id, title: c.name, text: `Utolsó alkalom van hátra a bérletből` });
     } else if (st === 'used') {
       const last = clientSessions(c.id).filter(s => derived().sessionPass.get(s.id) === p.id).pop();
@@ -207,15 +217,17 @@ function warnings() {
 
 function monthStats(mk) {
   const d = derived();
-  const sess = db.sessions.filter(s => mkey(s.date) === mk);
+  const all = db.sessions.filter(s => mkey(s.date) === mk);
+  const sess = all.filter(s => !isPlanned(s));
   const singles = sess.filter(s => !d.sessionPass.get(s.id)).reduce((a, s) => a + sessionValue(s), 0);
   const sold = db.passes.filter(p => mkey(p.start) === mk).reduce((a, p) => a + (p.price || 0), 0);
-  return { count: sess.length, clients: new Set(sess.map(s => s.clientId)).size, revenue: singles + sold, singles, sold };
+  return { count: sess.length, planned: all.length - sess.length, clients: new Set(sess.map(s => s.clientId)).size, revenue: singles + sold, singles, sold };
 }
 
 function billingFor(cid, mk) {
   const d = derived();
-  const sess = clientSessions(cid).filter(s => mkey(s.date) === mk);
+  const allM = clientSessions(cid).filter(s => mkey(s.date) === mk);
+  const sess = allM.filter(s => !isPlanned(s)), plannedM = allM.filter(isPlanned);
   const singles = { szemelyi: [], vip: [], pozo: [] }, passGroups = new Map();
   for (const s of sess) {
     const pid = d.sessionPass.get(s.id);
@@ -227,7 +239,7 @@ function billingFor(cid, mk) {
     const units = [...new Set(l.map(sessionValue))];
     return { kind, count: l.length, total, unit: units.length === 1 ? units[0] : null, dates: l.map(s => s.date) };
   });
-  const passLines = [...passGroups].map(([pid, l]) => ({ pass: d.passMap.get(pid), count: l.length, used: d.passUsed.get(pid) || 0, dates: l.map(s => s.date) }));
+  const passLines = [...passGroups].map(([pid, l]) => ({ pass: d.passMap.get(pid), count: l.length, used: d.passDone.get(pid) || 0, dates: l.map(s => s.date) }));
   const sold = clientPasses(cid).filter(p => mkey(p.start) === mk);
   const singlesTotal = singleLines.reduce((a, l) => a + l.total, 0);
   const soldDue = sold.filter(p => !p.paid).reduce((a, p) => a + (p.price || 0), 0);
@@ -239,7 +251,7 @@ function billingFor(cid, mk) {
   }
   const pz = singleLines.find(l => l.kind === 'pozo');
   if (!tip && pz && pz.count >= 10) { const pkg = svc('pole10'); if (pkg && pkg.price < pz.total) tip = `Tipp: a 10 alkalmas pózbérlettel ${ft(pkg.price)} lenne ${ft(pz.total)} helyett.`; }
-  return { sess, singleLines, passLines, sold, singlesTotal, soldDue, due: singlesTotal + soldDue, tip, billed: !!db.billing[cid + '|' + mk] };
+  return { sess, planned: plannedM, singleLines, passLines, sold, singlesTotal, soldDue, due: singlesTotal + soldDue, tip, billed: !!db.billing[cid + '|' + mk] };
 }
 
 /* ---------------- UI state ---------------- */
@@ -276,7 +288,7 @@ function viewHome() {
   const bars = [];
   for (let i = 5; i >= 0; i--) {
     const k = shiftMonth(mk, -i);
-    bars.push({ k, n: db.sessions.filter(s => mkey(s.date) === k).length, m: Number(k.slice(5)) - 1 });
+    bars.push({ k, n: db.sessions.filter(s => mkey(s.date) === k && !isPlanned(s)).length, m: Number(k.slice(5)) - 1 });
   }
   const max = Math.max(1, ...bars.map(b => b.n));
   const todays = db.sessions.filter(s => s.date === t).sort(cmpSess);
@@ -287,7 +299,7 @@ function viewHome() {
       <span class="row-main"><b>Ideje menteni</b><small>${db.settings.lastBackup ? 'Utolsó mentés: ' + relDay(iso(new Date(db.settings.lastBackup))) : 'Még nem volt mentés'} · ${db.settings.changes} változás</small></span><span class="go">Mentés</span></button>` : ''}
     <section class="hero">
       <div class="hero-top"><span class="eyebrow">${fmtMonth(mk)}</span><span class="chip-s accent">${st.clients} kliens</span></div>
-      <div class="hero-num"><span class="big" data-count="${st.count}">${st.count}</span><span class="unit">alkalom<br>ebben a hónapban</span></div>
+      <div class="hero-num"><span class="big" data-count="${st.count}">${st.count}</span><span class="unit">alkalom<br>ebben a hónapban${st.planned ? `<br><span style="color:var(--faint)">+${st.planned} tervezett</span>` : ''}</span></div>
       <div class="hero-foot">
         <div><span class="lbl">Várható bevétel</span><span class="val" data-count="${st.revenue}" data-ft="1">${ft(st.revenue)}</span></div>
         <div class="bars">${bars.map((b, i) => `<div class="bar ${i === 5 ? 'cur' : ''}"><i style="height:${Math.max(6, b.n / max * 100)}%;animation-delay:${i * 60}ms"></i><b>${MONTHS_I[b.m]}</b></div>`).join('')}</div>
@@ -313,7 +325,8 @@ function sessionRow(s, showDate = false) {
   const p = pid && derived().passMap.get(pid);
   let n = 0;
   if (p) n = clientSessions(s.clientId).filter(x => derived().sessionPass.get(x.id) === pid && cmpSess(x, s) <= 0).length;
-  const sub = p ? `<span class="tag-pass">Bérlet ${n}/${p.sessions}</span>` : `<span class="tag-single">Alkalmi · ${ft(sessionValue(s))}</span>`;
+  let sub = p ? `<span class="tag-pass">Bérlet ${n}/${p.sessions}</span>` : `<span class="tag-single">Alkalmi · ${ft(sessionValue(s))}</span>`;
+  if (isPlanned(s)) sub = `<span class="tag-plan">Tervezett</span> · ${sub}`;
   return `<button class="row" data-action="open-session" data-id="${s.id}">
     ${showDate ? `<span class="time">${relDay(s.date)}</span>` : `<span class="time ${s.time ? '' : 'none'}">${s.time || '–'}</span>`}
     <span class="avatar" style="--c:${c.color}">${esc(initials(c.name))}</span>
@@ -338,13 +351,15 @@ function viewCalendar(dir) {
   const mk = state.calMonth, t = today();
   const byDate = new Map();
   for (const s of db.sessions) { if (!byDate.has(s.date)) byDate.set(s.date, []); byDate.get(s.date).push(s); }
-  const monthCount = db.sessions.filter(s => mkey(s.date) === mk).length;
+  const monthAll = db.sessions.filter(s => mkey(s.date) === mk);
+  const monthCount = monthAll.filter(s => !isPlanned(s)).length, monthPlan = monthAll.length - monthCount;
   const grid = calGrid(mk, (date, out) => {
     const list = byDate.get(date) || [];
     const colors = [...new Set(list.map(s => (getClient(s.clientId) || {}).color || '#888'))].slice(0, 4);
+    const pl = date > t;
     const cls = ['day', out && 'out', list.length && 'has', date === t && 'today', date === state.selDate && 'sel', date > t && 'future'].filter(Boolean).join(' ');
     return `<button class="${cls}" data-action="pick-day" data-date="${date}"><span>${Number(date.slice(8))}</span>
-      ${list.length > 1 ? `<span class="cnt">${list.length}</span>` : ''}<span class="dots">${colors.map(c => `<i style="--c:${c}"></i>`).join('')}</span></button>`;
+      ${list.length > 1 ? `<span class="cnt">${list.length}</span>` : ''}<span class="dots">${colors.map(c => `<i class="${pl ? 'pl' : ''}" style="--c:${c}"></i>`).join('')}</span></button>`;
   });
   const sel = (byDate.get(state.selDate) || []).sort(cmpSess);
   const [, mm] = mk.split('-').map(Number);
@@ -353,7 +368,7 @@ function viewCalendar(dir) {
     <div class="${dir ? '' : 'enter'}">
     <section class="card cal-card" id="cal-card">
       <div class="cal-head">
-        <div class="m">${MONTHS[mm - 1]} <span style="color:var(--muted);font-weight:600">${mk.slice(0, 4)}</span><small>${monthCount} alkalom ebben a hónapban</small></div>
+        <div class="m">${MONTHS[mm - 1]} <span style="color:var(--muted);font-weight:600">${mk.slice(0, 4)}</span><small>${monthCount} alkalom${monthPlan ? ` · ${monthPlan} tervezett` : ''}</small></div>
         <div class="cal-nav"><button class="icon-btn" data-action="cal-prev" aria-label="Előző hónap">${ic.left}</button><button class="icon-btn" data-action="cal-next" aria-label="Következő hónap">${ic.right}</button></div>
       </div>
       <div id="cal-grid-wrap">${grid.replace('class="cal-grid"', `class="cal-grid ${dir === 1 ? 'slide-l' : dir === -1 ? 'slide-r' : ''}"`)}</div>
@@ -382,9 +397,9 @@ function clientListHtml() {
   if (!list.length) return `<div class="empty">Nincs találat erre: „${esc(state.q)}”<br><button class="btn primary sm" data-action="new-client" data-name="${esc(state.q)}">${ic.userPlus} Felveszem</button></div>`;
   return list.map(c => {
     const p = currentPass(c.id);
-    const n = clientSessions(c.id).filter(s => mkey(s.date) === mk).length;
+    const n = clientSessions(c.id).filter(s => mkey(s.date) === mk && !isPlanned(s)).length;
     let sub;
-    if (p) { const u = derived().passUsed.get(p.id) || 0; sub = `<span class="tag-pass">Bérlet ${u}/${p.sessions}</span> · lejár ${fmtDay(p.end)}`; }
+    if (p) { const u = derived().passDone.get(p.id) || 0; sub = `<span class="tag-pass">Bérlet ${u}/${p.sessions}</span> · lejár ${fmtDay(p.end)}`; }
     else {
       const ls = derived().lastSeen.get(c.id), lp = clientPasses(c.id).slice(-1)[0];
       const lpRecent = lp && daysBetween(lp.end, today()) <= 14;
@@ -394,7 +409,7 @@ function clientListHtml() {
     }
     return `<button class="row" data-action="open-client" data-id="${c.id}">
       <span class="avatar" style="--c:${c.color}">${esc(initials(c.name))}</span>
-      <span class="row-main"><b>${esc(c.name)}</b><small>${sub}</small></span>
+      <span class="row-main"><b>${esc(c.name)}</b><small>${sub}${c.schedule && c.schedule.days.length ? ` · <span class="tag-fix">Fix: ${schedLabel(c.schedule, true)}</span>` : ''}</small></span>
       <span class="end"><b>${n}</b><small>e hónapban</small></span></button>`;
   }).join('');
 }
@@ -406,7 +421,7 @@ function viewBilling() {
   const rows = [...ids].map(id => ({ c: getClient(id), b: billingFor(id, mk) })).filter(r => r.c).sort((a, b) => huSort(a.c.name, b.c.name));
   const total = rows.reduce((a, r) => a + r.b.due, 0);
   const done = rows.filter(r => r.b.billed).length;
-  const count = rows.reduce((a, r) => a + r.b.sess.length, 0);
+  const count = rows.reduce((a, r) => a + r.b.sess.length, 0), planCount = rows.reduce((a, r) => a + r.b.planned.length, 0);
   return `<header class="vhead"><div><p class="eyebrow">Havi összesítő</p><h1 class="title">Elszámolás</h1></div></header>
     <div class="enter">
     <div class="cal-head card" style="padding:12px 12px 12px 18px;border-radius:20px">
@@ -416,7 +431,7 @@ function viewBilling() {
     <section class="hero" style="margin-top:12px">
       <div class="hero-top"><span class="eyebrow">Számlázandó</span><span class="chip-s ${done === rows.length && rows.length ? 'accent' : ''}">${done}/${rows.length} kész</span></div>
       <div class="hero-num" style="margin-bottom:6px"><span class="big" style="font-size:58px" data-count="${total}" data-ft="1">${ft(total)}</span></div>
-      <p style="color:var(--muted);font-size:13px;position:relative">${count} alkalom · ${rows.length} kliens</p>
+      <p style="color:var(--muted);font-size:13px;position:relative">${count} alkalom${planCount ? ` · ${planCount} tervezett még hátra` : ''} · ${rows.length} kliens</p>
     </section>
     <div class="section-h"><h2>Kliensenként</h2></div>
     ${rows.length ? `<div class="list">${rows.map(({ c, b }) => {
@@ -428,7 +443,7 @@ function viewBilling() {
       return `<button class="row bill-row" data-action="open-bill" data-id="${c.id}">
         <span class="status-dot ${b.billed ? 'ok' : ''}"></span>
         <span class="avatar" style="--c:${c.color}">${esc(initials(c.name))}</span>
-        <span class="row-main"><b>${esc(c.name)}</b><small>${b.sess.length} alkalom · ${parts.join(' · ') || '—'}</small></span>
+        <span class="row-main"><b>${esc(c.name)}</b><small>${b.sess.length} alkalom${b.planned.length ? ` (+${b.planned.length} tervezett)` : ''} · ${parts.join(' · ') || '—'}</small></span>
         <span class="end"><b>${b.due ? ft(b.due) : '—'}</b><small>${b.billed ? 'számlázva' : 'nyitott'}</small></span></button>`;
     }).join('')}</div>` : `<div class="empty"><div class="em-ic">${ic.receipt}</div><b>Ebben a hónapban nincs elszámolnivaló</b>Lapozz a nyilakkal egy másik hónapra.</div>`}
     </div>`;
@@ -442,10 +457,10 @@ function ringSvg(used, total) {
     <div class="rt"><div><b>${used}</b><small>/ ${total}</small></div></div></div>`;
 }
 function passCard(p) {
-  const used = derived().passUsed.get(p.id) || 0, st = passStatus(p);
+  const used = derived().passDone.get(p.id) || 0, st = passStatus(p), plan = (derived().passUsed.get(p.id) || 0) - used;
   const label = { active: 'Aktív', future: 'Később indul', used: 'Elfogyott', expired: 'Lejárt' }[st];
   const dl = daysBetween(today(), p.end);
-  const sub = st === 'active' ? `${p.sessions - used} alkalom maradt · még ${dl} nap` : st === 'future' ? `Indul: ${fmtDay(p.start)}` : `${fmtDay(p.start)} – ${fmtDay(p.end)}`;
+  const sub = st === 'active' ? `${p.sessions - used} alkalom maradt${plan ? ` (${plan} már betervezve)` : ''} · még ${dl} nap` : st === 'future' ? `Indul: ${fmtDay(p.start)}` : `${fmtDay(p.start)} – ${fmtDay(p.end)}`;
   return `<button class="card pass-card" style="width:100%;text-align:left" data-action="edit-pass" data-id="${p.id}">
     ${ringSvg(used, p.sessions)}
     <div class="pass-info"><span class="chip-s ${st === 'active' ? 'accent' : ''}" style="margin-bottom:6px">${label}${p.paid ? ' · fizetve' : ''}</span>
@@ -456,7 +471,10 @@ function pageClient(id) {
   if (!c) return `<div class="page-inner"><div class="page-top"><button class="icon-btn" data-action="close-page">${ic.back}</button></div><div class="empty">A kliens törölve lett.</div></div>`;
   const sess = clientSessions(id).slice().sort(cmpSess).reverse();
   const mk = mkey(today());
-  const thisMonth = sess.filter(s => mkey(s.date) === mk).length;
+  const thisMonth = sess.filter(s => mkey(s.date) === mk && !isPlanned(s)).length;
+  const doneSess = sess.filter(s => !isPlanned(s));
+  const fut = derived().planned.get(id) || [];
+  const sch = c.schedule && c.schedule.days && c.schedule.days.length ? c.schedule : null;
   const passes = clientPasses(id).slice().reverse();
   const cur = passes.filter(p => ['active', 'future'].includes(passStatus(p)));
   const old = passes.filter(p => !cur.includes(p));
@@ -471,22 +489,28 @@ function pageClient(id) {
       <p>${c.phone ? `<a href="tel:${esc(c.phone.replace(/\s/g, ''))}">${esc(c.phone)}</a>` : 'Nincs telefonszám'}${c.note ? ' · ' + esc(c.note) : ''}</p></div>
     <div class="stats">
       <div class="stat"><div class="n">${thisMonth}</div><div class="t">E HÓNAPBAN</div></div>
-      <div class="stat"><div class="n">${sess.length}</div><div class="t">ÖSSZESEN</div></div>
-      <div class="stat"><div class="n" style="font-size:22px;line-height:32px">${sess.length ? relDay(sess[0].date) : '–'}</div><div class="t">UTOLJÁRA</div></div>
+      <div class="stat"><div class="n">${doneSess.length}</div><div class="t">ÖSSZESEN</div></div>
+      <div class="stat"><div class="n" style="font-size:22px;line-height:32px">${doneSess.length ? relDay(doneSess[0].date) : '–'}</div><div class="t">UTOLJÁRA</div></div>
     </div>
     <div class="actions">
       <button class="action primary" data-action="quick-add" data-client="${id}"><span class="ai">${ic.plus}</span>Alkalom</button>
       <button class="action" data-action="mark-days" data-id="${id}"><span class="ai">${ic.grid}</span>Napok jelölése</button>
       <button class="action" data-action="new-pass" data-id="${id}"><span class="ai">${ic.ticket}</span>Új bérlet</button>
     </div>
+    <div class="section-h"><h2>Fix időpont</h2>${sch ? `<button class="link" data-action="schedule" data-id="${id}">Módosítás</button>` : ''}</div>
+    ${sch ? `<button class="card sched-card" data-action="schedule" data-id="${id}">
+        <span class="sched-days">${[1, 2, 3, 4, 5, 6, 7].map(d => `<i class="${sch.days.includes(d) ? 'on' : ''}">${WD_S[d - 1]}</i>`).join('')}</span>
+        <span class="sched-info"><b>${esc(sch.time || '')} · ${KINDS[sch.kind].label}</b><small>${fut.length ? `${fut.length} tervezett alkalom a naptárban · utolsó: ${fmtDay(fut[fut.length - 1].date)}` : 'Nincs előre beírt alkalom – bökj ide a beíráshoz'}</small></span>
+      </button>`
+      : `<button class="card sched-card empty-sched" data-action="schedule" data-id="${id}"><span class="ai">${ic.clock}</span><span class="sched-info"><b>Fix időpont beállítása</b><small>pl. hétfő–szerda–péntek 16:00, és előre beírja a naptárba</small></span></button>`}
     ${cur.length ? `<div class="section-h"><h2>Bérlet</h2></div><div class="list">${cur.map(passCard).join('')}</div>` : ''}
     <div class="section-h"><h2>Alkalmak havonta</h2>${sess.length ? `<button class="link" data-action="open-bill" data-id="${id}" data-month="${mk}">Elszámolás</button>` : ''}</div>
-    ${groups.size ? [...groups].map(([k, l]) => `<div class="month-group"><div class="mg-h"><b>${fmtMonth(k)}</b><span>${l.length} alkalom</span></div>
+    ${groups.size ? [...groups].map(([k, l]) => { const dn = l.filter(s => !isPlanned(s)).length, pn = l.length - dn; return `<div class="month-group"><div class="mg-h"><b>${fmtMonth(k)}</b><span>${dn} alkalom${pn ? ` · ${pn} tervezett` : ''}</span></div>
       <div class="grouped">${l.map(s => {
         const pid = sp.get(s.id);
         return `<button class="mini-row" data-action="open-session" data-id="${s.id}"><span class="d">${fmtDay(s.date)}<small>${WD[parse(s.date).getDay()]}${s.time ? ' · ' + s.time : ''}</small></span>
-          <span class="${pid ? 'tag-pass' : 'tag-single'}" style="font-size:12px;font-weight:600">${pid ? 'bérlet' : 'alkalmi'}</span><span class="pill k-${s.kind}">${KINDS[s.kind].label}</span></button>`;
-      }).join('')}</div></div>`).join('')
+          <span class="${isPlanned(s) ? 'tag-plan' : pid ? 'tag-pass' : 'tag-single'}" style="font-size:12px;font-weight:600">${isPlanned(s) ? 'tervezett' : pid ? 'bérlet' : 'alkalmi'}</span><span class="pill k-${s.kind}">${KINDS[s.kind].label}</span></button>`;
+      }).join('')}</div></div>`; }).join('')
       : `<div class="empty"><div class="em-ic">${ic.calCheck}</div><b>Még nincs alkalom</b>Rögzítsd a mait, vagy jelöld be a korábbi napokat.<br><button class="btn primary sm" data-action="mark-days" data-id="${id}">${ic.grid} Napok jelölése</button></div>`}
     ${old.length ? `<div class="section-h"><h2>Korábbi bérletek</h2></div><div class="list">${old.map(passCard).join('')}</div>` : ''}
     <div style="height:20px"></div>
@@ -775,6 +799,105 @@ function markDays(cid) {
   });
 }
 
+/* ---------------- Sheets: fix időpont (ismétlődő alkalmak) ---------------- */
+function schedLabel(sch, short = false) {
+  const days = [...sch.days].sort((a, b) => a - b).map(d => short ? WD_S[d - 1] : WD_LONG_MON[d - 1]).join(short ? ', ' : ', ');
+  return `${days}${sch.time ? ' ' + sch.time : ''}`;
+}
+function scheduleDates(sch, start, count, cid) {
+  const out = [], skipped = [];
+  let date = start, guard = 0;
+  const existing = new Set(clientSessions(cid).filter(s => s.kind === sch.kind).map(s => s.date));
+  while (out.length < count && guard++ < 800) {
+    if (sch.days.includes(isoWd(date))) { if (existing.has(date)) skipped.push(date); else out.push(date); }
+    date = addDays(date, 1);
+  }
+  return { dates: out, skipped };
+}
+function scheduleSheet(cid) {
+  const c = getClient(cid); if (!c) return;
+  const prev = c.schedule || {};
+  const fut = (derived().planned.get(cid) || []);
+  const futPlanned = fut.filter(s => s.planned);
+  const st = { days: new Set(prev.days || []), time: prev.time || '16:00', kind: prev.kind || c.lastKind || 'szemelyi' };
+  const defStart = () => { const last = fut.filter(s => s.kind === st.kind).pop(); return last ? addDays(last.date, 1) : today(); };
+  const defCount = () => {
+    const p = clientPasses(cid).find(x => x.cat === st.kind && ['active', 'future'].includes(passStatus(x)));
+    if (p) { const left = p.sessions - (derived().passUsed.get(p.id) || 0); if (left > 0) return left; }
+    return 12;
+  };
+  openSheet(`<div class="sheet-head"><div><h2>Fix időpont</h2><p>${esc(c.name)} – rendszeres alkalmak előre a naptárba</p></div><button class="icon-btn" data-action="close-sheet">${ic.close}</button></div>
+    <div class="stack">
+      <div class="field"><span>Melyik napokon?</span><div class="seg days" id="sc-days">${[1, 2, 3, 4, 5, 6, 7].map(d => `<button data-d="${d}">${WD_S[d - 1]}</button>`).join('')}</div></div>
+      <div class="field-row even">
+        <label class="field"><span>Időpont</span><input type="time" id="sc-time" value="${st.time}" step="300"></label>
+        <label class="field"><span>Hány alkalom előre?</span><input type="number" inputmode="numeric" id="sc-n" min="1" max="60" value="${defCount()}"></label>
+      </div>
+      <div class="seg k" id="sc-kind">${Object.entries(KINDS).map(([k, v]) => `<button data-kind="${k}">${v.label}</button>`).join('')}</div>
+      <label class="field"><span>Kezdés <em>(ettől a naptól keresi az első alkalmat)</em></span><input type="date" id="sc-start" value="${defStart()}"></label>
+      <div class="receipt" id="sc-prev"></div>
+      <button class="btn primary block" id="sc-go">${ic.calCheck} Beírás a naptárba</button>
+      <button class="btn block" id="sc-save">Csak a beállítás mentése</button>
+      ${futPlanned.length ? `<button class="btn danger block" id="sc-clear">${ic.trash} Előre beírt alkalmak törlése (${futPlanned.length})</button>` : ''}
+      <p class="hint">Ha valaki lemond egy alkalmat, bökj rá a naptárban → <b>Lemondta</b>. A tervezett alkalmak csak az adott napon számítanak bele a statisztikába és az elszámolásba.</p>
+    </div>`, {
+    onMount: s => {
+      const draw = () => {
+        $$('#sc-days button', s).forEach(b => b.classList.toggle('on', st.days.has(Number(b.dataset.d))));
+        $$('#sc-kind button', s).forEach(b => b.classList.toggle('on', b.dataset.kind === st.kind));
+        const n = Math.max(1, Math.min(60, Number($('#sc-n', s).value) || 0));
+        const start = $('#sc-start', s).value || today();
+        const box = $('#sc-prev', s), go = $('#sc-go', s);
+        if (!st.days.size) { box.innerHTML = '<div class="dates" style="padding:4px 0">Jelöld ki, melyik napokon jön.</div>'; go.disabled = true; return; }
+        const sch = { days: [...st.days], time: $('#sc-time', s).value, kind: st.kind };
+        const { dates, skipped } = scheduleDates(sch, start, n, cid);
+        const p = passForNew(cid, st.kind, dates[0] || start);
+        box.innerHTML = `<div class="line"><span>Minden</span><b>${schedLabel(sch)}</b></div>
+          <div class="line"><span>${dates.length} alkalom</span><b>${dates.length ? `${fmtDay(dates[0])} – ${fmtDay(dates[dates.length - 1])}` : '–'}</b></div>
+          ${skipped.length ? `<div class="line"><span>Már beírva, kihagyja</span><b>${skipped.length} nap</b></div>` : ''}
+          <div class="dates" style="padding-top:8px">${p ? `A ${esc(p.name)} bérletből vonódnak le, ameddig van benne alkalom.` : `Nincs bérlet erre az időszakra – alkalmi áron számolódnak (${ft(singlePrice(st.kind))}).`}</div>`;
+        go.disabled = !dates.length;
+        go.innerHTML = `${ic.calCheck} ${dates.length} alkalom beírása`;
+      };
+      const saveSched = () => {
+        c.schedule = { days: [...st.days].sort((a, b) => a - b), time: $('#sc-time', s).value, kind: st.kind };
+        c.lastKind = st.kind;
+      };
+      $('#sc-days', s).onclick = e => { const b = e.target.closest('button'); if (!b) return; const d = Number(b.dataset.d); st.days.has(d) ? st.days.delete(d) : st.days.add(d); haptic(); draw(); };
+      $('#sc-kind', s).onclick = e => { const b = e.target.closest('button'); if (!b) return; st.kind = b.dataset.kind; $('#sc-start', s).value = defStart(); $('#sc-n', s).value = defCount(); draw(); };
+      ['#sc-time', '#sc-n', '#sc-start'].forEach(q => { $(q, s).oninput = draw; $(q, s).onchange = draw; });
+      $('#sc-save', s).onclick = () => {
+        if (!st.days.size) { toast('Jelölj ki legalább egy napot'); return; }
+        saveSched(); save(); closeSheet(); refresh(); toast('Fix időpont mentve');
+      };
+      $('#sc-go', s).onclick = () => {
+        if (!st.days.size) return;
+        saveSched();
+        const n = Math.max(1, Math.min(60, Number($('#sc-n', s).value) || 1));
+        const { dates } = scheduleDates(c.schedule, $('#sc-start', s).value || today(), n, cid);
+        const created = [];
+        for (const date of dates) {
+          const s1 = { id: uid(), clientId: cid, date, time: c.schedule.time || '', kind: c.schedule.kind, note: '', planned: true, unitPrice: singlePrice(c.schedule.kind), createdAt: Date.now() };
+          db.sessions.push(s1); created.push(s1.id);
+        }
+        save(); haptic(20); closeSheet(); refresh();
+        toast(`${created.length} alkalom beírva (${fmtDay(dates[0])} – ${fmtDay(dates[dates.length - 1])})`, {
+          action: 'Visszavonás', onAction: () => { db.sessions = db.sessions.filter(x => !created.includes(x.id)); save(); refresh(); }
+        });
+      };
+      const clr = $('#sc-clear', s);
+      if (clr) clr.onclick = async () => {
+        if (!await confirmDialog({ title: 'Előre beírt alkalmak törlése?', text: `${futPlanned.length} jövőbeli, fix időpontból beírt alkalom törlődik. A múltbeliek megmaradnak.`, ok: 'Törlés', danger: true })) return;
+        const ids = new Set(futPlanned.map(x => x.id));
+        const removed = db.sessions.filter(x => ids.has(x.id) && isPlanned(x));
+        db.sessions = db.sessions.filter(x => !(ids.has(x.id) && isPlanned(x)));
+        save(); closeSheet(); setTimeout(() => { refresh(); toast(`${removed.length} tervezett alkalom törölve`, { action: 'Visszavonás', onAction: () => { db.sessions.push(...removed); save(); refresh(); } }); }, 150);
+      };
+      draw();
+    }
+  });
+}
+
 /* ---------------- Sheets: session ---------------- */
 function sessionSheet(id) {
   const s0 = db.sessions.find(x => x.id === id); if (!s0) return;
@@ -782,7 +905,7 @@ function sessionSheet(id) {
   const st = { ...s0 };
   const pid = derived().sessionPass.get(id), p = pid && derived().passMap.get(pid);
   openSheet(`<div class="sheet-head"><div style="display:flex;gap:12px;align-items:center"><span class="avatar" style="--c:${c.color}">${esc(initials(c.name))}</span>
-      <div><h2 style="font-size:24px">${esc(c.name)}</h2><p>${p ? `Bérletből · ${esc(p.name)}` : `Alkalmi · ${ft(sessionValue(s0))}`}</p></div></div>
+      <div><h2 style="font-size:24px">${esc(c.name)}</h2><p>${isPlanned(s0) ? 'Tervezett · ' : ''}${p ? `Bérletből · ${esc(p.name)}` : `Alkalmi · ${ft(sessionValue(s0))}`}</p></div></div>
       <button class="icon-btn" data-action="close-sheet">${ic.close}</button></div>
     <div class="stack">
       <div class="field-row"><label class="field"><span>Dátum</span><input type="date" id="ss-date" value="${st.date}"></label>
@@ -790,7 +913,7 @@ function sessionSheet(id) {
       <div class="seg k" id="ss-kind">${Object.entries(KINDS).map(([k, v]) => `<button data-kind="${k}" class="${k === st.kind ? 'on' : ''}">${v.label}</button>`).join('')}</div>
       <label class="field"><span>Megjegyzés</span><input type="text" id="ss-note" value="${esc(st.note || '')}" placeholder="pl. láb nap, késett 10 percet…"></label>
       ${!p ? `<label class="field"><span>Alkalmi ár</span><input type="number" inputmode="numeric" id="ss-price" value="${sessionValue(s0)}"></label>` : ''}
-      <div class="btn-row"><button class="btn danger" id="ss-del">${ic.trash} Törlés</button><button class="btn primary" id="ss-save">${ic.check} Mentés</button></div>
+      <div class="btn-row"><button class="btn danger" id="ss-del">${ic.trash} ${isPlanned(s0) ? 'Lemondta' : 'Törlés'}</button><button class="btn primary" id="ss-save">${ic.check} Mentés</button></div>
       ${getClient(s0.clientId) ? `<button class="btn block" style="background:none;border:0;color:var(--accent-2)" id="ss-client">Kliens adatlapja →</button>` : ''}
     </div>`, {
     onMount: s => {
@@ -805,7 +928,7 @@ function sessionSheet(id) {
       $('#ss-del', s).onclick = () => {
         const t = db.sessions.find(x => x.id === id); if (!t) return;
         db.sessions = db.sessions.filter(x => x.id !== id); save(); closeSheet(); refresh(); haptic(15);
-        toast('Alkalom törölve', { action: 'Visszavonás', onAction: () => { db.sessions.push(t); save(); refresh(); } });
+        toast(isPlanned(t) ? 'Alkalom lemondva' : 'Alkalom törölve', { action: 'Visszavonás', onAction: () => { db.sessions.push(t); save(); refresh(); } });
       };
       const cb = $('#ss-client', s);
       if (cb) cb.onclick = () => { closeSheet(); setTimeout(() => openClient(s0.clientId), 200); };
@@ -866,7 +989,7 @@ function passForm(cid, passId) {
   const options = db.services.filter(x => !x.single);
   const first = p ? null : options[0];
   const st = p ? { ...p } : { serviceId: first.id, name: first.name, cat: first.cat, sessions: first.sessions, price: first.price, start: today(), end: addDays(today(), first.days - 1), paid: false, note: '' };
-  const used = p ? (derived().passUsed.get(p.id) || 0) : 0;
+  const used = p ? (derived().passDone.get(p.id) || 0) : 0;
   openSheet(`<div class="sheet-head"><div><h2>${p ? 'Bérlet' : 'Új bérlet'}</h2><p>${esc(c.name)}${p ? ` · ${used}/${p.sessions} felhasználva` : ''}</p></div><button class="icon-btn" data-action="close-sheet">${ic.close}</button></div>
     <div class="stack">
       ${p ? '' : `<label class="field"><span>Típus</span><select id="pf-svc">${options.map(o => `<option value="${o.id}">${esc(o.name)} – ${ft(o.price)}</option>`).join('')}</select></label>`}
@@ -941,7 +1064,8 @@ function billSheet(cid, mk = state.billMonth) {
             ${b.passLines.map(l => `<div class="line"><span>${esc(l.pass.name)}</span><b>${l.count} alkalom<br><small style="color:var(--muted);font-weight:500">összesen ${l.used}/${l.pass.sessions}</small></b></div>
               <div class="dates">${l.dates.map(fmtDay).join(' · ')}</div>`).join('')}
             ${b.sold.map(p => `<div class="line"><span>Új bérlet: ${esc(p.name)}</span><b>${ft(p.price)}${p.paid ? '<br><small style="color:var(--ok)">fizetve</small>' : ''}</b></div>`).join('')}
-            ${!b.sess.length && !b.sold.length ? '<div class="dates" style="padding:6px 0">Ebben a hónapban nincs tétel.</div>' : ''}
+            ${!b.sess.length && !b.sold.length ? '<div class="dates" style="padding:6px 0">Ebben a hónapban még nincs elszámolható tétel.</div>' : ''}
+            ${b.planned.length ? `<div class="line"><span>Tervezett, még nem számít bele</span><b>${b.planned.length} alkalom</b></div><div class="dates">${b.planned.map(s => fmtDay(s.date)).join(' · ')}</div>` : ''}
             <div class="total"><span class="lbl">Számlázandó</span><b>${ft(b.due)}</b></div>
           </div>
           ${b.tip ? `<div class="tip">${esc(b.tip)}</div>` : ''}
@@ -1070,6 +1194,8 @@ function loadDemo() {
       if (wd !== 0 && Math.random() < freq) db.sessions.push({ id: uid(), clientId: c.id, date, time: times[(i + rnd(0, 2)) % times.length], kind, note: '', createdAt: Date.now() + d, unitPrice: singlePrice(kind) });
     }
   });
+  const a = made[0]; a.schedule = { days: [1, 3, 5], time: '16:00', kind: 'szemelyi' };
+  scheduleDates(a.schedule, addDays(t, 1), 8, a.id).dates.forEach(date => db.sessions.push({ id: uid(), clientId: a.id, date, time: '16:00', kind: 'szemelyi', note: '', planned: true, unitPrice: singlePrice('szemelyi'), createdAt: Date.now() }));
   save(); render(true); toast('Bemutató adatok betöltve');
 }
 async function wipeAll() {
@@ -1102,6 +1228,7 @@ document.addEventListener('click', e => {
     case 'new-pass': passForm(d.id); break;
     case 'edit-pass': { const p = db.passes.find(x => x.id === d.id); if (p) passForm(p.clientId, p.id); break; }
     case 'mark-days': markDays(d.id); break;
+    case 'schedule': scheduleSheet(d.id); break;
     case 'open-bill': billSheet(d.id, d.month || state.billMonth); break;
     case 'pick-day': {
       const date = d.date;
