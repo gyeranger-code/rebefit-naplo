@@ -1,7 +1,7 @@
 /* ReBeFit Napló — service worker
  * Új verzió kiadásakor NÖVELD a VERSION értékét, különben a telefonok a régit mutatják.
  */
-const VERSION = 'v1.2.0';
+const VERSION = 'v1.2.1';
 const CACHE = 'rbf-naplo-' + VERSION;
 const ASSETS = [
   './', './index.html', './style.css', './app.js', './manifest.webmanifest',
@@ -12,7 +12,8 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
+  // cache: 'reload' – ne a böngésző HTTP-cache-éből (GitHub Pages 10 perc) vegye a régi fájlokat
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS.map(u => new Request(u, { cache: 'reload' })))));
 });
 
 self.addEventListener('activate', e => {

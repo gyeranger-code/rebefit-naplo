@@ -4,7 +4,7 @@
 'use strict';
 (() => {
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.2.1';
 const STORE_KEY = 'rbf-naplo-v1';
 const PREV_KEY = 'rbf-naplo-v1-import-elotti';
 const BACKUP_DAYS = 7;
@@ -1130,6 +1130,7 @@ function settingsSheet() {
       </div>
       <div class="section-h" style="margin:14px 4px 0"><h2>Általános</h2></div>
       <div class="set-group">
+        <button class="set-row" data-action="check-update"><span class="si">${ic.download}</span><span class="row-main"><b>${swWaiting ? 'Frissítés telepítése' : 'Frissítés keresése'}</b><small>${swWaiting ? 'Új verzió letöltve – bökj ide az újraindításhoz' : `Jelenlegi verzió: v${APP_VERSION}`}</small></span>${swWaiting ? '<span class="badge-dot" style="position:static;box-shadow:0 0 10px var(--accent)"></span>' : ''}</button>
         <button class="set-row" data-action="prices"><span class="si">${ic.tag}</span><span class="row-main"><b>Árlista</b><small>Alkalmi és bérlet árak módosítása</small></span><span class="chev">${ic.right}</span></button>
         <div class="set-row"><span class="si">${ic.user}</span><span class="row-main"><b>Megszólítás</b></span><input class="input" id="st-name" value="${esc(s0.name)}" style="max-width:150px;min-height:40px;text-align:right"></div>
         <div class="set-row" style="flex-wrap:wrap"><span class="si">${ic.moon}</span><span class="row-main"><b>Megjelenés</b></span>
@@ -1282,6 +1283,7 @@ document.addEventListener('click', e => {
       break;
     }
     case 'prices': pricesSheet(); break;
+    case 'check-update': checkUpdate(true); break;
     case 'demo': closeSheet(); setTimeout(loadDemo, 150); break;
     case 'wipe': wipeAll(); break;
   }
@@ -1293,19 +1295,38 @@ document.addEventListener('input', e => {
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 
 /* ---------------- Service worker ---------------- */
+let swReg = null, swWaiting = null, updateToastShown = false;
+function showUpdate(w) {
+  swWaiting = w;
+  if (updateToastShown) return;
+  updateToastShown = true;
+  toast('Új verzió érhető el', { action: 'Frissítés', duration: 10 * 60 * 1000, onAction: () => applyUpdate() });
+  refresh(); // beállításokban is jelezzük
+}
+function applyUpdate() { if (swWaiting) swWaiting.postMessage('skipWaiting'); else location.reload(); }
+async function checkUpdate(manual) {
+  if (!swReg) { if (manual) toast('A frissítés-keresés itt nem érhető el'); return; }
+  try { await swReg.update(); } catch (e) {}
+  if (swReg.waiting && navigator.serviceWorker.controller) { if (manual) applyUpdate(); else showUpdate(swReg.waiting); }
+  else if (manual) setTimeout(() => { if (swReg.waiting) applyUpdate(); else if (!swReg.installing) toast(`Ez a legfrissebb verzió (v${APP_VERSION})`); else toast('Új verzió töltődik…'); }, 1500);
+}
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').then(reg => {
-      const ask = w => toast('Új verzió érhető el', { action: 'Frissítés', duration: 15000, onAction: () => w.postMessage('skipWaiting') });
-      if (reg.waiting && navigator.serviceWorker.controller) ask(reg.waiting);
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
+      swReg = reg;
+      if (reg.waiting && navigator.serviceWorker.controller) showUpdate(reg.waiting);
       reg.addEventListener('updatefound', () => {
         const w = reg.installing;
-        w && w.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) ask(w); });
+        w && w.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) showUpdate(w); });
       });
+      reg.update().catch(() => {});
     }).catch(() => {});
     let reloaded = false;
     navigator.serviceWorker.addEventListener('controllerchange', () => { if (!reloaded) { reloaded = true; location.reload(); } });
   });
+  // iPhone-on a háttérből visszahozott app nem tölt újra – ilyenkor is keresünk frissítést
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && swReg) checkUpdate(false); });
+  setInterval(() => { if (swReg && !document.hidden) checkUpdate(false); }, 30 * 60 * 1000);
 }
 
 /* ---------------- Start ---------------- */
