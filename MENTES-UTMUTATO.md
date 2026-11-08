@@ -13,7 +13,7 @@
 - **+ gomb** (középen alul): új alkalom. Válaszd ki, ki volt ott (egyszerre többen is lehetnek), és mentsd.
 - **Naptár**: lapozz a nyilakkal vagy húzd oldalra. Ha egy napra rábökve még egyszer rábökök, felvihetsz arra a napra alkalmat, utólag is.
 - **Régi alkalmak feltöltése**: Kliensek → a kliens neve → **Napok jelölése**. Bökj azokra a napokra, amikor ott volt, és kész.
-- **Fix időpontos kliens** (pl. minden hétfő–szerda–péntek 16:00): Kliens → **Fix időpont beállítása** → jelöld a napokat és az órát → **Beírás a naptárba**. Ha lemondja, bökj az alkalomra a naptárban → **Lemondta**.
+- **Fix időpontos kliens** (pl. hétfő 16:00, szerda–csütörtök 15:00): Kliens → **Fix időpont beállítása** → jelöld a napokat, és mindegyiknél add meg az órát → **Beírás a naptárba**. Ha lemondja, bökj az alkalomra a naptárban → **Lemondta**.
 - **Bérlet**: Kliens → **Új bérlet**. Az alkalmak maguktól levonódnak belőle.
 - **Hó végén**: **Elszámolás** fül → kliens → **Másolás**, és illeszd be a számlázóba. Utána kapcsold be a „Számla kiállítva” kapcsolót.
 

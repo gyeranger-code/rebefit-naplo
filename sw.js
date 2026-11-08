@@ -1,7 +1,7 @@
 /* ReBeFit Napló — service worker
  * Új verzió kiadásakor NÖVELD a VERSION értékét, különben a telefonok a régit mutatják.
  */
-const VERSION = 'v1.1.0';
+const VERSION = 'v1.2.0';
 const CACHE = 'rbf-naplo-' + VERSION;
 const ASSETS = [
   './', './index.html', './style.css', './app.js', './manifest.webmanifest',
